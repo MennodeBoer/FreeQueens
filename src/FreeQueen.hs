@@ -1,17 +1,24 @@
-{-# LANGUAGE DataKinds            #-}
-{-# LANGUAGE DeriveFunctor        #-}
-{-# LANGUAGE EmptyCase            #-}
-{-# LANGUAGE FlexibleInstances    #-}
-{-# LANGUAGE GADTs                #-}
-{-# LANGUAGE InstanceSigs         #-}
-{-# LANGUAGE PolyKinds            #-}
-{-# LANGUAGE RankNTypes           #-}
-{-# LANGUAGE TypeFamilies         #-}
-{-# LANGUAGE TypeOperators        #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE DeriveFunctor     #-}
+{-# LANGUAGE EmptyCase         #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs             #-}
+{-# LANGUAGE InstanceSigs      #-}
+{-# LANGUAGE PolyKinds         #-}
+{-# LANGUAGE RankNTypes        #-}
+{-# LANGUAGE TypeFamilies      #-}
+{-# LANGUAGE TypeOperators     #-}
 
 module FreeQueen where
 
-import           Data.List (intercalate, reverse)
+import           Control.Monad.IO.Class     (MonadIO (liftIO))
+import           Control.Monad.State.Strict (StateT, execStateT, get, modify,
+                                             put, runStateT)
+import           Control.Monad.Trans        (lift)
+import           Control.Monad.Trans.Maybe
+import           Data.List                  (intercalate, reverse)
+import           Text.Read                  (readMaybe)
 
 ----------------
 -- With GADTs --
@@ -45,6 +52,10 @@ instance Monad (Free f) where
   Pure x >>= f = f x
   (Step fa cont) >>= f = Step fa ((>>= f) . cont)
 
+foldFree :: (Functor f, Monad m) => (forall x . f x -> m x) -> Free f a -> m a
+foldFree _ (Pure x)     = return x
+foldFree a (Step fa cc) = a (fmap cc fa) >>= foldFree a
+
 ------------------
 -- Permutations --
 ------------------
@@ -77,9 +88,10 @@ insert x (y:ys) = choice (return (x:y:ys))
                              return (y : partial))
 
 run :: ND a -> [a]
-run (Pure a)=       [a]
+run (Pure a)        = [a]
 run (Step Fail _)   = []
 run (Step Choice k) = run (k True) ++ run (k False)
+
 
 -------------
 -- nQueens --
@@ -91,32 +103,24 @@ data Commands a where
 
 type NonDet = Free Commands
 
-runNonDet :: NonDet a -> [a]
-runNonDet (Pure x)          = [x]
-runNonDet (Step Failure _)  = []
-runNonDet (Step (Choices n) cs) = foldChoices (++) [] (runNonDet . cs) n
-
-foldChoices :: (a -> b -> b) -> b -> (Int -> a) -> Int -> b
-foldChoices op start as 0 = start
-foldChoices op start as k = foldChoices op (op (as (k - 1)) start) as (k - 1)
-
 failure :: NonDet a
 failure = Step Failure never
 
 class HasEmpty f where
   emptyValue :: f a
 
-guard :: (HasEmpty m, Monad m) => Bool -> m ()
-guard True  = return ()
+guard :: (HasEmpty f, Applicative f) => Bool -> f ()
+guard True  = Prelude.pure ()
 guard False = emptyValue
 
 instance HasEmpty NonDet where
   emptyValue = failure
 
 choices :: Int -> (Int -> NonDet a) -> NonDet a
-choices = Step . Choices 
+choices = Step . Choices
 
 newtype Queens = Queens {unQueens :: [Int]}
+  deriving (Show, Eq, Semigroup, Monoid)
 
 nQueens :: Int -> NonDet Queens
 nQueens n = nQueensAcc n n
@@ -145,12 +149,21 @@ prettyPrintQueens = intercalate "\n"
                   . reverse
                   . unQueens
 
+runNonDet :: NonDet a -> [a]
+runNonDet (Pure x)              = [x]
+runNonDet (Step Failure _)      = []
+runNonDet (Step (Choices n) cs) = foldChoices (++) [] (runNonDet . cs) n
+
+foldChoices :: (a -> b -> b) -> b -> (Int -> a) -> Int -> b
+foldChoices op start as 0 = start
+foldChoices op start as k = foldChoices op (op (as (k - 1)) start) as (k - 1)
+
 runQueens :: Int -> IO ()
-runQueens = putStrLn 
-          . intercalate "\n\n" 
-          . runNonDet 
-          . fmap prettyPrintQueens 
-          . nQueens 
+runQueens = putStrLn
+          . intercalate "\n\n"
+          . runNonDet
+          . fmap prettyPrintQueens
+          . nQueens
 
 -------------------
 -- Without GADTs --
@@ -162,7 +175,7 @@ data Free' f a
 
 instance Functor f => Functor (Free' f) where
   fmap :: (a -> b) -> Free' f a -> Free' f b
-  fmap function (Pure' a) = Pure' (function a)
+  fmap function (Pure' a)    = Pure' (function a)
   fmap function (Free' more) = Free' $ fmap (fmap function) more
 
 instance Functor f => Applicative (Free' f) where
@@ -205,21 +218,21 @@ choice' :: ND' a -> ND' a -> ND' a
 choice' c1 c2  = liftF' $ Choice' (\b -> if b then c1 else c2)
 
 permutations' :: [a] -> ND' [a]
-permutations' [] = Pure' []
+permutations' []     = Pure' []
 permutations' (x:xs) = permutations' xs >>= insert' x
 
 insert' :: a -> [a] -> ND' [a]
 insert' x [] = return [x]
-insert' x (y:ys) = choice' (return (x:y:ys)) 
+insert' x (y:ys) = choice' (return (x:y:ys))
                            (do partial <- insert' x ys
                                return (y:partial))
 
-runF :: Command' a -> [a]
-runF Fail' = []
-runF (Choice' xs) = run' (xs True) ++ run' (xs False)
+runF' :: Command' a -> [a]
+runF' Fail'        = []
+runF' (Choice' xs) = run' (xs True) ++ run' (xs False)
 
 run' :: ND' a -> [a]
-run' = foldFree' runF 
+run' = foldFree' runF'
 
 --------------------------
 -- nQueens without GADTs --
@@ -229,13 +242,6 @@ data Commands' a = Failure' | Choices' Int (Int -> NonDet' a)
   deriving Functor
 
 type NonDet' = Free' Commands'
-
-runNonDetF :: Commands' a -> [a]
-runNonDetF Failure' = []
-runNonDetF (Choices' n cs) = foldChoices (++) [] (runNonDet' . cs) n
-
-runNonDet' :: NonDet' a -> [a] 
-runNonDet' = foldFree' runNonDetF
 
 failure' :: NonDet' a
 failure' = liftF' Failure'
@@ -260,9 +266,48 @@ chooseQueen' :: Int -> Queens -> Int -> NonDet' Queens
 chooseQueen' n (Queens qs) k = do guard (check qs k)
                                   return (Queens (k : qs))
 
+runNonDetF :: Commands' a -> [a]
+runNonDetF Failure'        = []
+runNonDetF (Choices' n cs) = foldChoices (++) [] (runNonDet' . cs) n
+
+runNonDet' :: NonDet' a -> [a]
+runNonDet' = foldFree' runNonDetF
+
 runQueens' :: Int -> IO ()
-runQueens' = putStrLn 
-           . intercalate "\n\n" 
-           . runNonDet' 
-           . fmap prettyPrintQueens 
+runQueens' = putStrLn
+           . intercalate "\n\n"
+           . runNonDet'
+           . fmap prettyPrintQueens
            . nQueens'
+
+
+instance Monad m => HasEmpty (MaybeT m) where
+  emptyValue = MaybeT (return Nothing)
+
+runInteractiveF' :: Commands' a -> MaybeT (StateT Queens IO) a
+runInteractiveF' Failure' = emptyValue
+runInteractiveF' (Choices' n cs) = do qs <- get
+                                      liftIO $ do putStrLn "Result so far:"
+                                                  putStrLn (prettyPrintQueens qs)
+                                                  putStrLn $ "Choose a position between 0 and " ++ show (n - 1)
+                                      k <- liftIO getLine >>= MaybeT . return . readMaybe
+                                      guard (0 <= k && k < n)
+                                      modify (Queens [k] <>)
+                                      runInteractive' (cs k)
+
+runInteractive' :: NonDet' a -> MaybeT (StateT Queens IO) a
+runInteractive' = foldFree' runInteractiveF'
+
+
+runInteractiveQueens :: Int -> IO ()
+runInteractiveQueens = (printSol =<<)
+                     . flip runStateT (Queens [])
+                     . runMaybeT
+                     . runInteractive'
+                     . nQueens'
+
+printSol :: (Maybe Queens, Queens) -> IO ()
+printSol (succes, sol)= do case succes of
+                            Nothing -> putStrLn "Too bad! That is not allowed. Result before crash:"
+                            Just _ -> putStrLn "Congrats! Final result:"
+                           putStrLn $ prettyPrintQueens sol
