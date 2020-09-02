@@ -19,6 +19,7 @@ import           Control.Monad.Trans        (lift)
 import           Control.Monad.Trans.Maybe
 import           Data.List                  (intercalate, reverse)
 import           Text.Read                  (readMaybe)
+import           Data.Functor.Classes
 
 ----------------
 -- With GADTs --
@@ -27,7 +28,7 @@ import           Text.Read                  (readMaybe)
 data Free f a where
     Pure :: a -> Free f a
     Step :: f a -> (a -> Free f b) -> Free f b
-
+  
 pure :: a -> Free f a
 pure = Pure
 
@@ -91,7 +92,6 @@ run :: ND a -> [a]
 run (Pure a)        = [a]
 run (Step Fail _)   = []
 run (Step Choice k) = run (k True) ++ run (k False)
-
 
 -------------
 -- nQueens --
@@ -173,6 +173,11 @@ data Free' f a
   = Pure' a
   | Free' (f (Free' f a))
 
+instance (Show1 f) => Show1 (Free' f) where 
+  liftShowsPrec sp sl = go 
+    where go d (Pure' a) = showsUnaryWith sp "Pure" d a
+          go d (Free' fa) = showsUnaryWith (liftShowsPrec go (liftShowList sp sl)) "Free" d fa
+
 instance Functor f => Functor (Free' f) where
   fmap :: (a -> b) -> Free' f a -> Free' f b
   fmap function (Pure' a)    = Pure' (function a)
@@ -206,7 +211,7 @@ foldFree' f (Free' as) = f as >>= foldFree' f
 -- Permutations without GADTs --
 --------------------------------
 
-data Command' a = Fail' | Choice' (Bool -> ND' a)
+data Command' a = Fail' | Choice' (Bool -> a)
     deriving Functor
 
 type ND' a = Free' Command' a
@@ -215,7 +220,7 @@ fail' :: ND' a
 fail' = liftF' Fail'
 
 choice' :: ND' a -> ND' a -> ND' a
-choice' c1 c2  = liftF' $ Choice' (\b -> if b then c1 else c2)
+choice' c1 c2  = Free' $ Choice' (\b -> if b then c1 else c2)
 
 permutations' :: [a] -> ND' [a]
 permutations' []     = Pure' []
@@ -223,13 +228,13 @@ permutations' (x:xs) = permutations' xs >>= insert' x
 
 insert' :: a -> [a] -> ND' [a]
 insert' x [] = return [x]
-insert' x (y:ys) = choice' (return (x:y:ys))
+insert' x (y:ys) = choice' (return (x : y : ys))
                            (do partial <- insert' x ys
                                return (y:partial))
 
 runF' :: Command' a -> [a]
 runF' Fail'        = []
-runF' (Choice' xs) = run' (xs True) ++ run' (xs False)
+runF' (Choice' xs) = [xs True, xs False]
 
 run' :: ND' a -> [a]
 run' = foldFree' runF'
@@ -238,7 +243,7 @@ run' = foldFree' runF'
 -- nQueens without GADTs --
 --------------------------
 
-data Commands' a = Failure' | Choices' Int (Int -> NonDet' a)
+data Commands' a = Failure' | Choices' Int (Int -> a)
   deriving Functor
 
 type NonDet' = Free' Commands'
@@ -250,14 +255,15 @@ instance HasEmpty NonDet' where
   emptyValue = failure'
 
 choices' :: Int -> (Int -> NonDet' a) -> NonDet' a
-choices' n = liftF' . Choices' n
+choices' n = Free' . Choices' n -- liftF' . Choices' n
 
 nQueens' :: Int -> NonDet' Queens
 nQueens' n = nQueensAcc' n n
 
 nQueensAcc' :: Int -> Int -> NonDet' Queens
 nQueensAcc' n 0 = Pure' (Queens [])
-nQueensAcc' n k = nQueensAcc' n (k - 1) >>= addQueen' n
+nQueensAcc' n k = do recurse <- nQueensAcc' n (k - 1) 
+                     addQueen' n recurse
 
 addQueen' :: Int -> Queens -> NonDet' Queens
 addQueen' n = choices' n . chooseQueen' n
@@ -268,7 +274,7 @@ chooseQueen' n (Queens qs) k = do guard (check qs k)
 
 runNonDetF :: Commands' a -> [a]
 runNonDetF Failure'        = []
-runNonDetF (Choices' n cs) = foldChoices (++) [] (runNonDet' . cs) n
+runNonDetF (Choices' n cs) = [cs k | k <- [0..n-1]]
 
 runNonDet' :: NonDet' a -> [a]
 runNonDet' = foldFree' runNonDetF
@@ -293,7 +299,7 @@ runInteractiveF' (Choices' n cs) = do qs <- get
                                       k <- liftIO getLine >>= MaybeT . return . readMaybe
                                       guard (0 <= k && k < n)
                                       modify (Queens [k] <>)
-                                      runInteractive' (cs k)
+                                      return (cs k)
 
 runInteractive' :: NonDet' a -> MaybeT (StateT Queens IO) a
 runInteractive' = foldFree' runInteractiveF'
@@ -311,3 +317,4 @@ printSol (succes, sol)= do case succes of
                             Nothing -> putStrLn "Too bad! That is not allowed. Result before crash:"
                             Just _ -> putStrLn "Congrats! Final result:"
                            putStrLn $ prettyPrintQueens sol
+ 
